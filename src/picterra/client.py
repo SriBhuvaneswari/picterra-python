@@ -1,9 +1,9 @@
 import os
 import time
-import requests
 import logging
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlencode
 
+import requests
 
 logger = logging.getLogger()
 
@@ -82,8 +82,8 @@ class APIClient():
                 raise APIError('Operation %s failed' % operation_id)
             time.sleep(poll_interval)
 
-    def _paginate_through_list(self, resource_endpoint: str):
-        url = self._api_url('%s/?page_number=1' % resource_endpoint)
+    def _paginate_through_list(self, resource_endpoint: str, querystring: str = ''):
+        url = self._api_url('%s/?%spage_number=1' % (resource_endpoint, querystring))
         data = []
         while url:
             logger.debug('Paginating through %s list at page %s' % (resource_endpoint, url))
@@ -97,7 +97,16 @@ class APIClient():
         assert len(data) == count
         return data
 
-    def upload_raster(self, filename, name, folder_id=None, captured_at=None):
+    def _check_if_already_uploaded(self, file_path: str, identity_key: str, folder_id: str = ''):
+        for r in self.list_rasters(folder_id):
+            if r['identity_key'] == identity_key:
+                return r['id']
+        return False
+
+    def upload_raster(
+        self, filename: str, name: str, folder_id: str = None, captured_at: str = None,
+        check_existing_context: str = 'everywhere', identity_key: str = ''
+    ):
         """
         Upload a raster to picterra.
 
@@ -108,21 +117,35 @@ class APIClient():
                 belongs to.
             captured_at (optional, str): ISO-8601 date and time at which
                 this raster was captured.
+            check_existing_context (optional, str): Where to check for already uploaded
+                rasters; one of 'everywhere', 'folder'
+            identity_key (optional, str): Unique identifier for the file to upload, used
+                for checking double uploads
 
         Returns:
             raster_id (str): The id of the uploaded raster
         """
-        data = {
-            'name': name
-        }
+        CHECK_VALUES = ('everywhere', 'folder')
+        if check_existing_context not in CHECK_VALUES:
+            raise ValueError(
+                'Invalid "check_existing_context" param "%s"; allowed values are: %s.' % (
+                    check_existing_context, ', '.join(CHECK_VALUES))
+            )
+        if check_existing_context and identity_key:
+            clone = self._check_if_already_uploaded(
+                filename, identity_key, folder_id if check_existing_context == 'folder' else ''
+            )
+            if clone:
+                raise APIError("A file with the same content of %s was already uploaded (id=%s)" % (
+                    filename, clone
+                ))
+        data = {'name': name}
         if folder_id is not None:
-            data.update({
-                'folder_id': folder_id
-            })
+            data.update({'folder_id': folder_id})
         if captured_at is not None:
-            data.update({
-                'captured_at': captured_at
-            })
+            data.update({'captured_at': captured_at})
+        if identity_key is not None:
+            data.update({'identity_key': identity_key})
         resp = self.sess.post(
             self._api_url('rasters/upload/file/'),
             data
@@ -146,8 +169,10 @@ class APIClient():
         self._wait_until_operation_completes(resp.json())
         return raster_id
 
-    def list_rasters(self):
+    def list_rasters(self, folder_id: str = ''):
         """
+        Args:
+            folder_id (str, optional): The id of the folder to search in
         Returns:
             A list of rasters dictionaries
 
@@ -167,7 +192,11 @@ class APIClient():
                 }
 
         """
-        return self._paginate_through_list('rasters')
+        if folder_id != '':
+            querystring = urlencode({'folder': folder_id})
+        else:
+            querystring = ''
+        return self._paginate_through_list('rasters', querystring)
 
     def delete_raster(self, raster_id):
         """

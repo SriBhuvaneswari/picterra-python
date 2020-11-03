@@ -1,8 +1,9 @@
 import tempfile
 import responses
 import pytest
-from picterra import APIClient
+from picterra.client import APIClient, APIError
 from urllib.parse import urljoin
+from unittest.mock import MagicMock
 
 TEST_API_URL = 'http://example.com/public/api/v2/'
 
@@ -19,23 +20,24 @@ def api_url(path):
     return urljoin(TEST_API_URL, path)
 
 
-def add_mock_rasters_list_response():
+def add_mock_rasters_list_response(folder_id=''):
+    qs = ("folder=%s&" % folder_id) if folder_id else ''
     data1 = {
-        "count": 4, "next": api_url('rasters/?page_number=2'), "previous": None, "page_size": 2,
+        "count": 4, "next": api_url('rasters/?%spage_number=2' % qs), "previous": None, "page_size": 2,
         "results": [
-            {"id": "40", "status": "ready", "name": "raster1"},
-            {"id": "41", "status": "ready", "name": "raster2"}
+            {"id": "40", "status": "ready", "name": "raster1", "identity_key": "4040"},
+            {"id": "41", "status": "ready", "name": "raster2", "identity_key": "4141"}
         ]
     }
     data2 = {
         "count": 4, "next": None, "previous": None, "page_size": 2,
         "results": [
-            {"id": "42", "status": "ready", "name": "raster3"},
-            {"id": "43", "status": "ready", "name": "raster4"}
+            {"id": "42", "status": "ready", "name": "raster3", "identity_key": "4242"},
+            {"id": "43", "status": "ready", "name": "raster4", "identity_key": "4343"}
         ]
     }
-    responses.add(responses.GET, api_url('rasters/?page_number=1'), json=data1, status=200)
-    responses.add(responses.GET, api_url('rasters/?page_number=2'), json=data2, status=200)
+    responses.add(responses.GET, api_url('rasters/?%spage_number=1' % qs), json=data1, status=200)
+    responses.add(responses.GET, api_url('rasters/?%spage_number=2' % qs), json=data2, status=200)
 
 
 def add_mock_detectors_list_response():
@@ -295,6 +297,10 @@ def test_list_rasters():
     rasters = client.list_rasters()
     assert rasters[0]['name'] == 'raster1'
     assert rasters[1]['name'] == 'raster2'
+    add_mock_rasters_list_response('foobar')
+    rasters = client.list_rasters()
+    assert rasters[0]['name'] == 'raster1'
+    assert rasters[1]['name'] == 'raster2'
 
 
 @responses.activate
@@ -409,3 +415,36 @@ def test_train_detector():
     add_mock_operations_responses('success')
     client = _client()
     client.train_detector(1)
+
+
+@responses.activate
+def test_clone(monkeypatch):
+    # Client
+    client = _client()
+    # Checksum generators mockers
+    add_mock_rasters_list_response()
+    add_mock_raster_upload_responses()
+    add_mock_operations_responses('success')
+    add_mock_rasters_list_response()
+    # This just tests that this doesn't raise
+    with tempfile.NamedTemporaryFile() as f:
+        client.upload_raster(f.name, name='test 1')
+        # Test invalid
+        with pytest.raises(ValueError, match=r"spam"):
+            client.upload_raster(f.name, name='c', check_existing_context='spam')
+        # Test clone is detected
+        with pytest.raises(APIError, match=r"already uploaded.*41"):
+            client.upload_raster(f.name, name='test 2', identity_key="4141")
+        # Test clone is not detected
+        client.upload_raster(f.name, name='test 3', identity_key="99999")
+        # Test clone is not detected if targeting a folder
+        mock_list = MagicMock(return_value=[{'id': 'spam', 'identity_key': 'foo'}])
+        monkeypatch.setattr(client, 'list_rasters', mock_list)
+        client.upload_raster(
+            f.name, name='test 3', identity_key="41", check_existing_context="folder", folder_id="123456789")
+        assert mock_list.called_with_once("123456789")
+        mock_list.reset_mock()
+        # Test clone is detected if targeting a folder
+        with pytest.raises(APIError, match=r"already uploaded.*spam"):
+            client.upload_raster(f.name, name='test 2', identity_key="foo")
+        assert mock_list.called_with_once("123456789")
